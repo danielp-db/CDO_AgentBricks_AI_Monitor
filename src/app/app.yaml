@@ -8,6 +8,10 @@ command:
 
 env:
   - name: DATABRICKS_CATALOG
-    value: finops_monitor
+    value: att_log_anomaly_catalog
   - name: DATABRICKS_SCHEMA
-    value: default
+    value: finops_monitor
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: 0b11e3b9a1c7aff0
+  - name: DATABRICKS_ENDPOINT_NAME
+    value: t2t-3ce36a81-endpoint

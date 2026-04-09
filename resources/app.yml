@@ -17,11 +17,19 @@ resources:
             value: ${var.catalog}
           - name: DATABRICKS_SCHEMA
             value: ${var.schema}
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: DATABRICKS_ENDPOINT_NAME
+            value: ${var.endpoint_name}
       resources:
         - name: finops-sql-warehouse
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: CAN_USE
+        - name: finops-agent-endpoint
+          serving_endpoint:
+            name: ${var.endpoint_name}
+            permission: CAN_QUERY
       permissions:
         - user_name: daniel.perez@databricks.com
           level: CAN_MANAGE

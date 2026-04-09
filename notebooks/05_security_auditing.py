@@ -8,11 +8,13 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "finops_monitor", "Catalog")
-dbutils.widgets.text("schema", "default", "Schema")
+dbutils.widgets.text("catalog", "att_log_anomaly_catalog", "Catalog")
+dbutils.widgets.text("schema", "finops_monitor", "Schema")
+dbutils.widgets.text("endpoint_name", "t2t-3ce36a81-endpoint", "Serving Endpoint")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 
 # COMMAND ----------
 
@@ -88,10 +90,7 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 w = WorkspaceClient()
 
-ENDPOINTS_TO_TRY = [
-    "finops-assistant-agent",
-    "databricks-meta-llama-3-3-70b-instruct",
-]
+ENDPOINTS_TO_TRY = [ENDPOINT_NAME]
 
 def call_finops_agent(prompt):
     system_msg = (

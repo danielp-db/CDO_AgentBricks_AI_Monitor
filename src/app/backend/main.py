@@ -1,57 +1,66 @@
 import os
 import json
 import uuid
+import logging
 from datetime import datetime
+from typing import Optional, Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-from databricks import sql as dbsql
+
+logger = logging.getLogger("finops")
 
 app = FastAPI(title="FinOps AI Assistant")
 
-CATALOG = os.environ.get("DATABRICKS_CATALOG", "finops_monitor")
-SCHEMA = os.environ.get("DATABRICKS_SCHEMA", "default")
+CATALOG = os.environ.get("DATABRICKS_CATALOG", "att_log_anomaly_catalog")
+SCHEMA = os.environ.get("DATABRICKS_SCHEMA", "finops_monitor")
+WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "0b11e3b9a1c7aff0")
 
-FINOPS_ENDPOINTS = [
-    "finops-assistant-agent",
-    "databricks-meta-llama-3-3-70b-instruct",
-]
+ENDPOINT_NAME = os.environ.get("DATABRICKS_ENDPOINT_NAME", "t2t-3ce36a81-endpoint")
+FINOPS_ENDPOINTS = [ENDPOINT_NAME]
 
-# Mount static files
-static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Singleton WorkspaceClient
+_ws: Optional[WorkspaceClient] = None
 
 
-def get_sql_connection():
-    """Get Databricks SQL connection using app service principal."""
-    w = WorkspaceClient()
-    # Find a warehouse to use
-    warehouses = list(w.warehouses.list())
-    if not warehouses:
-        raise RuntimeError("No SQL warehouse available")
-    wh = warehouses[0]
+def get_ws() -> WorkspaceClient:
+    global _ws
+    if _ws is None:
+        _ws = WorkspaceClient()
+    return _ws
 
-    return dbsql.connect(
-        server_hostname=w.config.host.replace("https://", ""),
-        http_path=f"/sql/1.0/warehouses/{wh.id}",
-        credentials_provider=lambda: w.config._header_factory(),
+
+def run_query(query: str) -> list[dict[str, Any]]:
+    """Execute SQL via Statement Execution API."""
+    ws = get_ws()
+    response = ws.statement_execution.execute_statement(
+        warehouse_id=WAREHOUSE_ID,
+        statement=query,
+        wait_timeout="30s",
     )
 
+    if response.status and response.status.state and response.status.state.value == "FAILED":
+        error_msg = ""
+        if response.status.error:
+            error_msg = response.status.error.message or "Unknown SQL error"
+        raise RuntimeError(f"SQL error: {error_msg}")
 
-def run_query(query: str) -> list[dict]:
-    """Execute a SQL query and return results as list of dicts."""
-    conn = get_sql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
-    finally:
-        conn.close()
+    columns = []
+    if response.manifest and response.manifest.schema and response.manifest.schema.columns:
+        columns = [col.name for col in response.manifest.schema.columns]
+
+    rows = []
+    if response.result and response.result.data_array:
+        for row_data in response.result.data_array:
+            row = {}
+            for idx, col_name in enumerate(columns):
+                row[col_name] = row_data[idx] if idx < len(row_data) else None
+            rows.append(row)
+
+    return rows
 
 
 def serialize_result(data):
@@ -67,16 +76,9 @@ def serialize_result(data):
 
 # --------------- API Routes ---------------
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    """Serve the main dashboard page."""
-    with open(os.path.join(static_dir, "index.html")) as f:
-        return HTMLResponse(content=f.read())
-
-
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "catalog": CATALOG, "schema": SCHEMA}
+    return {"status": "ok", "catalog": CATALOG, "schema": SCHEMA, "warehouse": WAREHOUSE_ID}
 
 
 @app.get("/api/overview")
@@ -124,6 +126,7 @@ async def overview():
             "anomalies": anomalies,
         }))
     except Exception as e:
+        logger.exception("overview error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -131,13 +134,11 @@ async def overview():
 async def costs():
     """Cost analysis data."""
     try:
-        # Latest analysis
         latest = run_query(f"""
             SELECT * FROM {CATALOG}.{SCHEMA}.cost_analysis_results
             ORDER BY run_timestamp DESC LIMIT 20
         """)
 
-        # Daily trend
         trend = run_query(f"""
             SELECT DATE(usage_date) as date,
                    agent_name,
@@ -148,7 +149,6 @@ async def costs():
             ORDER BY date
         """)
 
-        # By SKU
         by_sku = run_query(f"""
             SELECT sku_name, SUM(total_cost) as total
             FROM {CATALOG}.{SCHEMA}.billing_usage
@@ -162,6 +162,7 @@ async def costs():
             "by_sku": by_sku,
         }))
     except Exception as e:
+        logger.exception("costs error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -189,6 +190,7 @@ async def performance():
             "latency_trend": latency_trend,
         }))
     except Exception as e:
+        logger.exception("performance error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -213,6 +215,7 @@ async def quality():
             "trend": trend,
         }))
     except Exception as e:
+        logger.exception("quality error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -237,6 +240,7 @@ async def security():
             "by_severity": by_severity,
         }))
     except Exception as e:
+        logger.exception("security error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -261,6 +265,7 @@ async def anomalies():
             "by_type": by_type,
         }))
     except Exception as e:
+        logger.exception("anomalies error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -277,6 +282,7 @@ async def queries():
             "optimizations": optimizations,
         }))
     except Exception as e:
+        logger.exception("queries error")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -335,7 +341,7 @@ Answer questions about agent costs, performance, quality, security, and anomalie
 Be specific with numbers, timestamps, and agent names. Provide actionable recommendations."""
 
     # Call the FinOps agent
-    w = WorkspaceClient()
+    ws = get_ws()
     response_text = None
     endpoint_used = None
 
@@ -346,7 +352,7 @@ Be specific with numbers, timestamps, and agent names. Provide actionable recomm
 
     for endpoint in FINOPS_ENDPOINTS:
         try:
-            response = w.serving_endpoints.query(
+            response = ws.serving_endpoints.query(
                 name=endpoint,
                 messages=messages,
                 max_tokens=4000,
@@ -361,17 +367,13 @@ Be specific with numbers, timestamps, and agent names. Provide actionable recomm
     if not response_text:
         response_text = "I'm sorry, I couldn't process your request. The FinOps agent endpoint is currently unavailable."
 
-    # Store chat history
+    # Store chat history (best-effort)
     try:
-        conn = get_sql_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""INSERT INTO {CATALOG}.{SCHEMA}.chat_history
-                (timestamp, session_id, user_message, assistant_response, model_used)
-                VALUES (current_timestamp(), ?, ?, ?, ?)""",
-            [session_id, user_message, response_text, endpoint_used or "none"],
-        )
-        conn.close()
+        run_query(f"""
+            INSERT INTO {CATALOG}.{SCHEMA}.chat_history
+            (timestamp, session_id, user_message, assistant_response, model_used)
+            VALUES (current_timestamp(), '{session_id}', '{user_message.replace("'", "''")}', '{response_text[:2000].replace("'", "''")}', '{endpoint_used or "none"}')
+        """)
     except Exception:
         pass
 
@@ -380,3 +382,17 @@ Be specific with numbers, timestamps, and agent names. Provide actionable recomm
         "session_id": session_id,
         "model_used": endpoint_used,
     })
+
+
+# Mount static files and serve index.html at root
+static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    """Serve the main dashboard page."""
+    with open(os.path.join(static_dir, "index.html")) as f:
+        return HTMLResponse(content=f.read())
+
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")

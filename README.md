@@ -85,7 +85,7 @@ databricks workspace list / --profile fevm-att-log-anomaly
 
 The DAB is configured in `databricks.yml`:
 - **Bundle name**: `finops-ai-assistant`
-- **Variables**: `catalog` (default: `finops_monitor`), `schema` (default: `default`), `warehouse_id`
+- **Variables**: `catalog` (default: `att_log_anomaly_catalog`), `schema` (default: `finops_monitor`), `warehouse_id`
 - **Targets**: `dev` and `prod` pointing to the workspace
 
 Review and update the `warehouse_id` variable:
@@ -206,12 +206,12 @@ llm = w.agent_bricks.create_custom_llm(
     name="finops-assistant-agent",
     instructions="You are the AI Agentic FinOps Assistant...",
     datasets=[Dataset(table=Table(
-        table_path="finops_monitor.default.training_data",
+        table_path="att_log_anomaly_catalog.finops_monitor.training_data",
         request_col="request",
         response_col="response",
     ))],
     guidelines=["Always include dollar amounts...", ...],
-    agent_artifact_path="finops_monitor.default",
+    agent_artifact_path="att_log_anomaly_catalog.finops_monitor",
 )
 w.agent_bricks.start_optimize(llm.id)
 ```
@@ -310,5 +310,5 @@ databricks bundle destroy \
 
 To also remove the data:
 ```sql
-DROP CATALOG IF EXISTS finops_monitor CASCADE;
+DROP SCHEMA IF EXISTS att_log_anomaly_catalog.finops_monitor CASCADE;
 ```

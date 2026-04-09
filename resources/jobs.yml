@@ -33,6 +33,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}
 
     # ---------- Every 15 min: Performance Monitoring ----------
     finops_performance_monitoring:
@@ -47,6 +48,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}
 
     # ---------- Daily: Quality Evaluation ----------
     finops_quality_evaluation:
@@ -61,6 +63,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}
 
     # ---------- Daily: Query Optimization ----------
     finops_query_optimization:
@@ -75,6 +78,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}
 
     # ---------- Every 5 min: Security Auditing ----------
     finops_security_auditing:
@@ -89,6 +93,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}
 
     # ---------- Every 10 min: Anomaly Detection ----------
     finops_anomaly_detection:
@@ -103,3 +108,4 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              endpoint_name: ${var.endpoint_name}

@@ -13,8 +13,8 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "finops_monitor", "Catalog")
-dbutils.widgets.text("schema", "default", "Schema")
+dbutils.widgets.text("catalog", "att_log_anomaly_catalog", "Catalog")
+dbutils.widgets.text("schema", "finops_monitor", "Schema")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -111,39 +111,10 @@ from databricks.sdk.service.agentbricks import CustomLlm, Dataset, Table
 
 LLM_NAME = "finops-assistant-agent"
 
-# Check if already exists by listing and filtering
-existing_llm = None
+# Try to create; if it already exists the API returns an error we can catch.
+llm = None
 try:
-    # Try to find existing LLM by iterating (API may not have direct get-by-name)
-    for llm in w.agent_bricks.list_custom_llms():
-        if llm.name == LLM_NAME:
-            existing_llm = llm
-            break
-except Exception:
-    pass
-
-if existing_llm:
-    print(f"Found existing Custom LLM: {existing_llm.name} (ID: {existing_llm.id})")
-    print(f"  State: {existing_llm.optimization_state}")
-    print(f"  Endpoint: {existing_llm.endpoint_name}")
-
-    # Update instructions if needed
-    try:
-        updated = w.agent_bricks.update_custom_llm(
-            existing_llm.id,
-            CustomLlm(
-                instructions=FINOPS_INSTRUCTIONS,
-                guidelines=FINOPS_GUIDELINES,
-            ),
-            update_mask="instructions,guidelines"
-        )
-        print("  Instructions updated.")
-    except Exception as e:
-        print(f"  Could not update (may be optimizing): {e}")
-
-    llm = existing_llm
-else:
-    print(f"Creating new Custom LLM: {LLM_NAME}")
+    print(f"Attempting to create Custom LLM: {LLM_NAME}")
     llm = w.agent_bricks.create_custom_llm(
         name=LLM_NAME,
         instructions=FINOPS_INSTRUCTIONS,
@@ -158,9 +129,33 @@ else:
         agent_artifact_path=f"{CATALOG}.{SCHEMA}",
     )
     print(f"  Created! ID: {llm.id}")
+except Exception as create_err:
+    err_msg = str(create_err)
+    print(f"  Create returned: {err_msg}")
+
+    # Already exists — extract the ID from the error or look up via serving endpoints
+    if "already exists" in err_msg.lower() or "ALREADY_EXISTS" in err_msg or "RESOURCE_CONFLICT" in err_msg:
+        print(f"  Custom LLM '{LLM_NAME}' already exists. Skipping creation.")
+
+        # Try to get the ID from the error message (often contains it)
+        import re
+        id_match = re.search(r'[a-f0-9]{32}|[a-f0-9-]{36}', err_msg)
+        if id_match:
+            existing_id = id_match.group(0)
+            try:
+                llm = w.agent_bricks.get_custom_llm(existing_id)
+                print(f"  Retrieved existing LLM: {llm.name} (ID: {llm.id})")
+                print(f"  State: {llm.optimization_state}")
+                print(f"  Endpoint: {llm.endpoint_name}")
+            except Exception as get_err:
+                print(f"  Could not retrieve by ID: {get_err}")
+    else:
+        # Unexpected error — re-raise
+        raise create_err
 
 # Store LLM ID for other notebooks
-dbutils.jobs.taskValues.set(key="agentbricks_llm_id", value=str(llm.id))
+if llm:
+    dbutils.jobs.taskValues.set(key="agentbricks_llm_id", value=str(llm.id))
 dbutils.jobs.taskValues.set(key="agentbricks_llm_name", value=LLM_NAME)
 
 # COMMAND ----------
@@ -172,7 +167,10 @@ dbutils.jobs.taskValues.set(key="agentbricks_llm_name", value=LLM_NAME)
 
 import time
 
-if llm.optimization_state in (None, "CREATED", "FAILED", "CANCELLED"):
+if llm is None:
+    print("LLM already exists but could not retrieve details. Skipping optimization.")
+    print("The demo will use the existing endpoint or fall back to a foundation model.")
+elif llm.optimization_state in (None, "CREATED", "FAILED", "CANCELLED"):
     print("Starting optimization...")
     try:
         optimized = w.agent_bricks.start_optimize(llm.id)

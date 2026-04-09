@@ -3,13 +3,16 @@ bundle:
 
 variables:
   catalog:
-    default: finops_monitor
+    default: att_log_anomaly_catalog
     description: Unity Catalog name for FinOps data
   schema:
-    default: default
+    default: finops_monitor
     description: Schema for FinOps tables
   warehouse_id:
     description: SQL Warehouse ID for queries
+  endpoint_name:
+    default: t2t-3ce36a81-endpoint
+    description: Serving endpoint name for the FinOps agent
 
 include:
   - resources/*.yml

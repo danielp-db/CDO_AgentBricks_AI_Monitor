@@ -482,6 +482,8 @@
 
         const COLORS = ['#4285f4', '#34a853', '#fbbc04', '#ea4335', '#a855f7', '#06b6d4'];
 
+        function num(v) { const n = Number(v); return isNaN(n) ? null : n; }
+
         function destroyChart(id) {
             if (charts[id]) { charts[id].destroy(); delete charts[id]; }
         }
@@ -493,16 +495,16 @@
 
             const cards = document.getElementById('overview-cards');
             const cost = data.cost?.[0];
-            const totalCost = cost?.total_cost || '—';
-            const costChange = cost?.cost_change_pct;
+            const totalCost = num(cost?.total_cost);
+            const costChange = num(cost?.cost_change_pct);
             const perfIssues = (data.performance || []).filter(p => p.sla_status !== 'HEALTHY').length;
-            const secAlerts = (data.security || []).reduce((a, b) => a + (b.count || 0), 0);
-            const anomalyCount = (data.anomalies || []).reduce((a, b) => a + (b.count || 0), 0);
+            const secAlerts = (data.security || []).reduce((a, b) => a + (num(b.count) || 0), 0);
+            const anomalyCount = (data.anomalies || []).reduce((a, b) => a + (num(b.count) || 0), 0);
 
             cards.innerHTML = `
                 <div class="card">
                     <div class="card-title">Weekly Cost</div>
-                    <div class="card-value" style="color:var(--accent-blue)">$${typeof totalCost === 'number' ? totalCost.toLocaleString(undefined, {maximumFractionDigits:0}) : totalCost}</div>
+                    <div class="card-value" style="color:var(--accent-blue)">$${totalCost != null ? totalCost.toLocaleString(undefined, {maximumFractionDigits:0}) : '—'}</div>
                     <div class="card-sub">${costChange != null ? (costChange >= 0 ? '+' : '') + costChange.toFixed(1) + '% WoW' : ''}</div>
                 </div>
                 <div class="card">
@@ -528,8 +530,8 @@
                 <tr>
                     <td>${p.endpoint_name}</td>
                     <td>${statusBadge(p.sla_status)}</td>
-                    <td>${p.avg_latency_ms?.toFixed(0) || '—'} ms</td>
-                    <td>${(p.error_rate * 100)?.toFixed(2) || '—'}%</td>
+                    <td>${num(p.avg_latency_ms) != null ? num(p.avg_latency_ms).toFixed(0) : '—'} ms</td>
+                    <td>${num(p.error_rate) != null ? (num(p.error_rate) * 100).toFixed(2) : '—'}%</td>
                 </tr>
             `).join('');
 
@@ -554,7 +556,7 @@
                             label: agent,
                             data: dates.map(d => {
                                 const row = data.trend.find(r => r.date === d && r.agent_name === agent);
-                                return row?.daily_cost || 0;
+                                return num(row?.daily_cost) || 0;
                             }),
                             borderColor: COLORS[i % COLORS.length],
                             tension: 0.3,
@@ -602,7 +604,7 @@
                             label: ep,
                             data: hours.map(h => {
                                 const row = data.latency_trend.find(r => r.hour === h && r.endpoint_name === ep);
-                                return row?.avg_latency || 0;
+                                return num(row?.avg_latency) || 0;
                             }),
                             borderColor: COLORS[i % COLORS.length],
                             tension: 0.3,
@@ -618,9 +620,9 @@
                 <tr>
                     <td>${p.endpoint_name}</td>
                     <td>${statusBadge(p.sla_status)}</td>
-                    <td>${p.avg_latency_ms?.toFixed(0)} ms</td>
-                    <td>${p.p95_latency_ms?.toFixed(0)} ms</td>
-                    <td>${(p.error_rate * 100)?.toFixed(2)}%</td>
+                    <td>${num(p.avg_latency_ms) != null ? num(p.avg_latency_ms).toFixed(0) : '—'} ms</td>
+                    <td>${num(p.p95_latency_ms) != null ? num(p.p95_latency_ms).toFixed(0) : '—'} ms</td>
+                    <td>${num(p.error_rate) != null ? (num(p.error_rate) * 100).toFixed(2) : '—'}%</td>
                     <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${p.summary?.slice(0, 150) || '—'}</td>
                 </tr>
             `).join('');
@@ -643,7 +645,7 @@
                             label: ep,
                             data: dates.map(d => {
                                 const row = data.trend.find(r => r.date === d && r.endpoint_name === ep);
-                                return row?.overall_score || null;
+                                return num(row?.overall_score);
                             }),
                             borderColor: COLORS[i % COLORS.length],
                             tension: 0.3,
@@ -659,7 +661,7 @@
             tbody.innerHTML = (data.latest || []).map(q => `
                 <tr>
                     <td>${q.endpoint_name}</td>
-                    <td>${q.overall_score?.toFixed(3) || '—'}</td>
+                    <td>${num(q.overall_score) != null ? num(q.overall_score).toFixed(3) : '—'}</td>
                     <td>${q.drift_detected ? severityBadge('HIGH') : statusBadge('HEALTHY')}</td>
                     <td style="max-width:400px">${q.summary?.slice(0, 200) || '—'}</td>
                 </tr>
@@ -705,7 +707,7 @@
                     <td>${a.resource_name}</td>
                     <td>${severityBadge(a.severity)}</td>
                     <td style="max-width:300px">${a.description?.slice(0, 200) || '—'}</td>
-                    <td>${a.deviation_pct?.toFixed(1) || '—'}%</td>
+                    <td>${num(a.deviation_pct) != null ? num(a.deviation_pct).toFixed(1) : '—'}%</td>
                 </tr>
             `).join('');
         }
@@ -721,7 +723,7 @@
                     <td>${severityBadge(q.priority)}</td>
                     <td style="max-width:250px;font-family:monospace;font-size:11px">${q.query_text?.slice(0, 100) || '—'}</td>
                     <td style="max-width:300px">${q.optimization_suggestion?.slice(0, 200) || '—'}</td>
-                    <td>$${q.estimated_cost?.toFixed(2) || '0.00'}</td>
+                    <td>$${num(q.estimated_cost) != null ? num(q.estimated_cost).toFixed(2) : '0.00'}</td>
                 </tr>
             `).join('');
         }
