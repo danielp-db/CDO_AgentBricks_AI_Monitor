@@ -1,0 +1,26 @@
+bundle:
+  name: finops-ai-assistant
+
+variables:
+  catalog:
+    default: finops_monitor
+    description: Unity Catalog name for FinOps data
+  schema:
+    default: default
+    description: Schema for FinOps tables
+  warehouse_id:
+    description: SQL Warehouse ID for queries
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-att-log-anomaly.cloud.databricks.com
+
+  prod:
+    workspace:
+      host: https://fevm-att-log-anomaly.cloud.databricks.com

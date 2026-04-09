@@ -1,0 +1,105 @@
+resources:
+  jobs:
+    # ---------- One-time Setup ----------
+    finops_setup:
+      name: "[FinOps Assistant] 00 - Setup & AgentBricks Initialization"
+      tasks:
+        - task_key: generate_telemetry
+          notebook_task:
+            notebook_path: ../notebooks/07_generate_telemetry.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+        - task_key: setup
+          depends_on:
+            - task_key: generate_telemetry
+          notebook_task:
+            notebook_path: ../notebooks/00_setup.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Hourly: Cost Analysis ----------
+    finops_cost_analysis:
+      name: "[FinOps Assistant] 01 - Cost Analysis (Hourly)"
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: cost_analysis
+          notebook_task:
+            notebook_path: ../notebooks/01_cost_analysis.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Every 15 min: Performance Monitoring ----------
+    finops_performance_monitoring:
+      name: "[FinOps Assistant] 02 - Performance Monitoring (15 min)"
+      schedule:
+        quartz_cron_expression: "0 */15 * * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: performance_monitoring
+          notebook_task:
+            notebook_path: ../notebooks/02_performance_monitoring.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Daily: Quality Evaluation ----------
+    finops_quality_evaluation:
+      name: "[FinOps Assistant] 03 - Quality Evaluation (Daily)"
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: quality_evaluation
+          notebook_task:
+            notebook_path: ../notebooks/03_quality_evaluation.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Daily: Query Optimization ----------
+    finops_query_optimization:
+      name: "[FinOps Assistant] 04 - Query Optimization (Daily)"
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: query_optimization
+          notebook_task:
+            notebook_path: ../notebooks/04_query_optimization.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Every 5 min: Security Auditing ----------
+    finops_security_auditing:
+      name: "[FinOps Assistant] 05 - Security Auditing (5 min)"
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: security_auditing
+          notebook_task:
+            notebook_path: ../notebooks/05_security_auditing.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
+    # ---------- Every 10 min: Anomaly Detection ----------
+    finops_anomaly_detection:
+      name: "[FinOps Assistant] 06 - Anomaly Detection (Continuous)"
+      schedule:
+        quartz_cron_expression: "0 */10 * * * ?"
+        timezone_id: America/New_York
+      tasks:
+        - task_key: anomaly_detection
+          notebook_task:
+            notebook_path: ../notebooks/06_anomaly_detection.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}

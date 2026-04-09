@@ -1,0 +1,27 @@
+resources:
+  apps:
+    finops_dashboard:
+      name: finops-assistant
+      description: "[FinOps Assistant] AI Agentic FinOps Assistant - Monitor, analyze, and optimize GenAI workloads"
+      source_code_path: ../src/app
+      config:
+        command:
+          - uvicorn
+          - backend.main:app
+          - --host
+          - "0.0.0.0"
+          - --port
+          - "8000"
+        env:
+          - name: DATABRICKS_CATALOG
+            value: ${var.catalog}
+          - name: DATABRICKS_SCHEMA
+            value: ${var.schema}
+      resources:
+        - name: finops-sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+      permissions:
+        - user_name: daniel.perez@databricks.com
+          level: CAN_MANAGE

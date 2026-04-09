@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinOps AI Assistant</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        :root {
+            --bg-primary: #0f1117;
+            --bg-secondary: #1a1d29;
+            --bg-card: #222536;
+            --text-primary: #e8eaed;
+            --text-secondary: #9aa0a6;
+            --accent-blue: #4285f4;
+            --accent-green: #34a853;
+            --accent-yellow: #fbbc04;
+            --accent-red: #ea4335;
+            --accent-purple: #a855f7;
+            --border: #333652;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header .badge {
+            background: var(--accent-blue);
+            color: white;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 500;
+        }
+
+        .header .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .tabs {
+            display: flex;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--text-secondary);
+            border-bottom: 2px solid transparent;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .tab:hover { color: var(--text-primary); }
+        .tab.active {
+            color: var(--accent-blue);
+            border-bottom-color: var(--accent-blue);
+        }
+
+        .content { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .card-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        .card-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .card-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .badge-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-healthy { background: rgba(52,168,83,0.15); color: var(--accent-green); }
+        .badge-warning { background: rgba(251,188,4,0.15); color: var(--accent-yellow); }
+        .badge-critical { background: rgba(234,67,53,0.15); color: var(--accent-red); }
+
+        .table-container { overflow-x: auto; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            color: var(--text-secondary);
+            font-weight: 500;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .chart-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .chart-container canvas { max-height: 300px; }
+
+        /* Chat Interface */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 160px);
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .chat-msg {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .chat-msg.user {
+            align-self: flex-end;
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .chat-msg.assistant {
+            align-self: flex-start;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+        }
+
+        .chat-input-area {
+            display: flex;
+            gap: 12px;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+        }
+
+        .chat-input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+        }
+
+        .chat-input-area input:focus { border-color: var(--accent-blue); }
+
+        .chat-input-area button {
+            padding: 12px 24px;
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .chat-input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .hidden { display: none; }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .suggestion-chips {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding: 0 20px 12px;
+        }
+
+        .chip {
+            padding: 6px 14px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chip:hover {
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            FinOps AI Assistant
+            <span class="badge">AgentBricks</span>
+        </h1>
+        <div class="status">
+            <div class="status-dot"></div>
+            <span id="lastUpdate">Loading...</span>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-tab="overview">Overview</div>
+        <div class="tab" data-tab="costs">Cost Analysis</div>
+        <div class="tab" data-tab="performance">Performance</div>
+        <div class="tab" data-tab="quality">Quality</div>
+        <div class="tab" data-tab="security">Security</div>
+        <div class="tab" data-tab="anomalies">Anomalies</div>
+        <div class="tab" data-tab="queries">Query Optimization</div>
+        <div class="tab" data-tab="chat">Ask AI</div>
+    </div>
+
+    <div class="content">
+        <!-- Overview Tab -->
+        <div id="tab-overview" class="tab-content">
+            <div class="grid" id="overview-cards"></div>
+            <div class="grid">
+                <div class="chart-container">
+                    <div class="card-title">Cost Trend (14 days)</div>
+                    <canvas id="costTrendChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <div class="card-title">Endpoint Latency</div>
+                    <canvas id="latencyChart"></canvas>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Performance Status</div>
+                <div class="table-container">
+                    <table id="perf-table">
+                        <thead><tr><th>Endpoint</th><th>Status</th><th>Avg Latency</th><th>Error Rate</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cost Tab -->
+        <div id="tab-costs" class="tab-content hidden">
+            <div class="grid" id="cost-cards"></div>
+            <div class="chart-container">
+                <div class="card-title">Daily Cost by Agent</div>
+                <canvas id="costByAgentChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="card-title">Cost by SKU</div>
+                <canvas id="costBySkuChart"></canvas>
+            </div>
+            <div class="card">
+                <div class="card-title">Latest Cost Analysis</div>
+                <div id="cost-analysis-text" style="padding: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap;"></div>
+            </div>
+        </div>
+
+        <!-- Performance Tab -->
+        <div id="tab-performance" class="tab-content hidden">
+            <div class="chart-container">
+                <div class="card-title">Latency Trend (24h)</div>
+                <canvas id="perfLatencyTrend"></canvas>
+            </div>
+            <div class="card">
+                <div class="card-title">Endpoint Performance</div>
+                <div class="table-container">
+                    <table id="perf-detail-table">
+                        <thead><tr><th>Endpoint</th><th>Status</th><th>Avg Latency</th><th>P95 Latency</th><th>Error Rate</th><th>Analysis</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quality Tab -->
+        <div id="tab-quality" class="tab-content hidden">
+            <div class="chart-container">
+                <div class="card-title">Quality Scores (30 days)</div>
+                <canvas id="qualityTrendChart"></canvas>
+            </div>
+            <div class="card">
+                <div class="card-title">Quality Report</div>
+                <div class="table-container">
+                    <table id="quality-table">
+                        <thead><tr><th>Endpoint</th><th>Overall Score</th><th>Drift</th><th>Summary</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Security Tab -->
+        <div id="tab-security" class="tab-content hidden">
+            <div class="grid" id="security-cards"></div>
+            <div class="card">
+                <div class="card-title">Security Alerts</div>
+                <div class="table-container">
+                    <table id="security-table">
+                        <thead><tr><th>Severity</th><th>Type</th><th>User</th><th>Description</th><th>Action</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Anomalies Tab -->
+        <div id="tab-anomalies" class="tab-content hidden">
+            <div class="grid" id="anomaly-cards"></div>
+            <div class="card">
+                <div class="card-title">Detected Anomalies</div>
+                <div class="table-container">
+                    <table id="anomaly-table">
+                        <thead><tr><th>Type</th><th>Resource</th><th>Severity</th><th>Description</th><th>Deviation</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Query Optimization Tab -->
+        <div id="tab-queries" class="tab-content hidden">
+            <div class="card">
+                <div class="card-title">Query Optimization Suggestions</div>
+                <div class="table-container">
+                    <table id="query-table">
+                        <thead><tr><th>Priority</th><th>Query</th><th>Suggestion</th><th>Est. Cost</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Tab -->
+        <div id="tab-chat" class="tab-content hidden">
+            <div class="chat-container">
+                <div class="chat-messages" id="chatMessages">
+                    <div class="chat-msg assistant">Welcome! I'm the FinOps AI Assistant powered by AgentBricks. Ask me anything about your GenAI workload costs, performance, quality, security, or anomalies.</div>
+                </div>
+                <div class="suggestion-chips">
+                    <span class="chip" onclick="sendSuggestion(this)">What's the total cost this week?</span>
+                    <span class="chip" onclick="sendSuggestion(this)">Any SLA violations?</span>
+                    <span class="chip" onclick="sendSuggestion(this)">Show security alerts</span>
+                    <span class="chip" onclick="sendSuggestion(this)">Which agents have quality drift?</span>
+                    <span class="chip" onclick="sendSuggestion(this)">Recommend cost optimizations</span>
+                </div>
+                <div class="chat-input-area">
+                    <input type="text" id="chatInput" placeholder="Ask about your GenAI workloads..." onkeydown="if(event.key==='Enter')sendChat()">
+                    <button onclick="sendChat()" id="chatSendBtn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let charts = {};
+        const sessionId = crypto.randomUUID();
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.remove('hidden');
+                loadTabData(tab.dataset.tab);
+            });
+        });
+
+        function statusBadge(status) {
+            const s = (status || '').toUpperCase();
+            if (s === 'HEALTHY' || s === 'GREEN') return `<span class="badge-status badge-healthy">${s}</span>`;
+            if (s === 'WARNING' || s === 'MEDIUM') return `<span class="badge-status badge-warning">${s}</span>`;
+            return `<span class="badge-status badge-critical">${s}</span>`;
+        }
+
+        function severityBadge(sev) {
+            const s = (sev || '').toUpperCase();
+            if (s === 'LOW') return `<span class="badge-status badge-healthy">${s}</span>`;
+            if (s === 'MEDIUM') return `<span class="badge-status badge-warning">${s}</span>`;
+            return `<span class="badge-status badge-critical">${s}</span>`;
+        }
+
+        async function fetchAPI(path) {
+            try {
+                const res = await fetch(path);
+                return await res.json();
+            } catch (e) {
+                console.error('API error:', path, e);
+                return null;
+            }
+        }
+
+        const COLORS = ['#4285f4', '#34a853', '#fbbc04', '#ea4335', '#a855f7', '#06b6d4'];
+
+        function destroyChart(id) {
+            if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+        }
+
+        // ---- Overview ----
+        async function loadOverview() {
+            const data = await fetchAPI('/api/overview');
+            if (!data || data.error) return;
+
+            const cards = document.getElementById('overview-cards');
+            const cost = data.cost?.[0];
+            const totalCost = cost?.total_cost || '—';
+            const costChange = cost?.cost_change_pct;
+            const perfIssues = (data.performance || []).filter(p => p.sla_status !== 'HEALTHY').length;
+            const secAlerts = (data.security || []).reduce((a, b) => a + (b.count || 0), 0);
+            const anomalyCount = (data.anomalies || []).reduce((a, b) => a + (b.count || 0), 0);
+
+            cards.innerHTML = `
+                <div class="card">
+                    <div class="card-title">Weekly Cost</div>
+                    <div class="card-value" style="color:var(--accent-blue)">$${typeof totalCost === 'number' ? totalCost.toLocaleString(undefined, {maximumFractionDigits:0}) : totalCost}</div>
+                    <div class="card-sub">${costChange != null ? (costChange >= 0 ? '+' : '') + costChange.toFixed(1) + '% WoW' : ''}</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">SLA Violations</div>
+                    <div class="card-value" style="color:${perfIssues > 0 ? 'var(--accent-red)' : 'var(--accent-green)'}">${perfIssues}</div>
+                    <div class="card-sub">${data.performance?.length || 0} endpoints monitored</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Security Alerts (1h)</div>
+                    <div class="card-value" style="color:${secAlerts > 0 ? 'var(--accent-yellow)' : 'var(--accent-green)'}">${secAlerts}</div>
+                    <div class="card-sub">Across all severity levels</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Anomalies (1h)</div>
+                    <div class="card-value" style="color:${anomalyCount > 0 ? 'var(--accent-red)' : 'var(--accent-green)'}">${anomalyCount}</div>
+                    <div class="card-sub">Cost, latency, error spikes</div>
+                </div>
+            `;
+
+            // Performance table
+            const tbody = document.querySelector('#perf-table tbody');
+            tbody.innerHTML = (data.performance || []).map(p => `
+                <tr>
+                    <td>${p.endpoint_name}</td>
+                    <td>${statusBadge(p.sla_status)}</td>
+                    <td>${p.avg_latency_ms?.toFixed(0) || '—'} ms</td>
+                    <td>${(p.error_rate * 100)?.toFixed(2) || '—'}%</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        }
+
+        // ---- Costs ----
+        async function loadCosts() {
+            const data = await fetchAPI('/api/costs');
+            if (!data || data.error) return;
+
+            // Cost by agent trend chart
+            if (data.trend?.length) {
+                const agents = [...new Set(data.trend.map(r => r.agent_name))];
+                const dates = [...new Set(data.trend.map(r => r.date))].sort();
+                destroyChart('costByAgentChart');
+                charts.costByAgentChart = new Chart(document.getElementById('costByAgentChart'), {
+                    type: 'line',
+                    data: {
+                        labels: dates.map(d => d.slice(5)),
+                        datasets: agents.map((agent, i) => ({
+                            label: agent,
+                            data: dates.map(d => {
+                                const row = data.trend.find(r => r.date === d && r.agent_name === agent);
+                                return row?.daily_cost || 0;
+                            }),
+                            borderColor: COLORS[i % COLORS.length],
+                            tension: 0.3,
+                            fill: false,
+                        }))
+                    },
+                    options: { responsive: true, plugins: { legend: { labels: { color: '#9aa0a6' } } }, scales: { x: { ticks: { color: '#9aa0a6' } }, y: { ticks: { color: '#9aa0a6', callback: v => '$' + v } } } }
+                });
+            }
+
+            // Cost by SKU pie chart
+            if (data.by_sku?.length) {
+                destroyChart('costBySkuChart');
+                charts.costBySkuChart = new Chart(document.getElementById('costBySkuChart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: data.by_sku.map(r => r.sku_name),
+                        datasets: [{ data: data.by_sku.map(r => r.total), backgroundColor: COLORS }]
+                    },
+                    options: { responsive: true, plugins: { legend: { position: 'right', labels: { color: '#9aa0a6', font: { size: 11 } } } } }
+                });
+            }
+
+            // Latest analysis text
+            if (data.latest?.length) {
+                const latest = data.latest.find(r => r.analysis_type === 'weekly_summary') || data.latest[0];
+                document.getElementById('cost-analysis-text').textContent = latest.summary || latest.raw_response?.slice(0, 1000) || 'No analysis available yet.';
+            }
+        }
+
+        // ---- Performance ----
+        async function loadPerformance() {
+            const data = await fetchAPI('/api/performance');
+            if (!data || data.error) return;
+
+            if (data.latency_trend?.length) {
+                const endpoints = [...new Set(data.latency_trend.map(r => r.endpoint_name))];
+                const hours = [...new Set(data.latency_trend.map(r => r.hour))].sort();
+                destroyChart('perfLatencyTrend');
+                charts.perfLatencyTrend = new Chart(document.getElementById('perfLatencyTrend'), {
+                    type: 'line',
+                    data: {
+                        labels: hours.map(h => new Date(h).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+                        datasets: endpoints.map((ep, i) => ({
+                            label: ep,
+                            data: hours.map(h => {
+                                const row = data.latency_trend.find(r => r.hour === h && r.endpoint_name === ep);
+                                return row?.avg_latency || 0;
+                            }),
+                            borderColor: COLORS[i % COLORS.length],
+                            tension: 0.3,
+                            fill: false,
+                        }))
+                    },
+                    options: { responsive: true, plugins: { legend: { labels: { color: '#9aa0a6' } } }, scales: { x: { ticks: { color: '#9aa0a6', maxTicksLimit: 12 } }, y: { ticks: { color: '#9aa0a6', callback: v => v + 'ms' } } } }
+                });
+            }
+
+            const tbody = document.querySelector('#perf-detail-table tbody');
+            tbody.innerHTML = (data.latest || []).map(p => `
+                <tr>
+                    <td>${p.endpoint_name}</td>
+                    <td>${statusBadge(p.sla_status)}</td>
+                    <td>${p.avg_latency_ms?.toFixed(0)} ms</td>
+                    <td>${p.p95_latency_ms?.toFixed(0)} ms</td>
+                    <td>${(p.error_rate * 100)?.toFixed(2)}%</td>
+                    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${p.summary?.slice(0, 150) || '—'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ---- Quality ----
+        async function loadQuality() {
+            const data = await fetchAPI('/api/quality');
+            if (!data || data.error) return;
+
+            if (data.trend?.length) {
+                const endpoints = [...new Set(data.trend.map(r => r.endpoint_name))];
+                const dates = [...new Set(data.trend.map(r => r.date))].sort();
+                destroyChart('qualityTrendChart');
+                charts.qualityTrendChart = new Chart(document.getElementById('qualityTrendChart'), {
+                    type: 'line',
+                    data: {
+                        labels: dates.map(d => d.slice(5)),
+                        datasets: endpoints.map((ep, i) => ({
+                            label: ep,
+                            data: dates.map(d => {
+                                const row = data.trend.find(r => r.date === d && r.endpoint_name === ep);
+                                return row?.overall_score || null;
+                            }),
+                            borderColor: COLORS[i % COLORS.length],
+                            tension: 0.3,
+                            fill: false,
+                            spanGaps: true,
+                        }))
+                    },
+                    options: { responsive: true, plugins: { legend: { labels: { color: '#9aa0a6' } } }, scales: { x: { ticks: { color: '#9aa0a6' } }, y: { min: 0, max: 1, ticks: { color: '#9aa0a6' } } } }
+                });
+            }
+
+            const tbody = document.querySelector('#quality-table tbody');
+            tbody.innerHTML = (data.latest || []).map(q => `
+                <tr>
+                    <td>${q.endpoint_name}</td>
+                    <td>${q.overall_score?.toFixed(3) || '—'}</td>
+                    <td>${q.drift_detected ? severityBadge('HIGH') : statusBadge('HEALTHY')}</td>
+                    <td style="max-width:400px">${q.summary?.slice(0, 200) || '—'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ---- Security ----
+        async function loadSecurity() {
+            const data = await fetchAPI('/api/security');
+            if (!data || data.error) return;
+
+            const cards = document.getElementById('security-cards');
+            const byS = {};
+            (data.by_severity || []).forEach(r => byS[r.severity] = r.count);
+            cards.innerHTML = `
+                <div class="card"><div class="card-title">Critical</div><div class="card-value" style="color:var(--accent-red)">${byS.CRITICAL || 0}</div></div>
+                <div class="card"><div class="card-title">High</div><div class="card-value" style="color:var(--accent-yellow)">${byS.HIGH || 0}</div></div>
+                <div class="card"><div class="card-title">Medium</div><div class="card-value" style="color:var(--accent-blue)">${byS.MEDIUM || 0}</div></div>
+                <div class="card"><div class="card-title">Low</div><div class="card-value" style="color:var(--accent-green)">${byS.LOW || 0}</div></div>
+            `;
+
+            const tbody = document.querySelector('#security-table tbody');
+            tbody.innerHTML = (data.alerts || []).slice(0, 20).map(a => `
+                <tr>
+                    <td>${severityBadge(a.severity)}</td>
+                    <td>${a.alert_type || '—'}</td>
+                    <td>${a.user_name || '—'}</td>
+                    <td style="max-width:300px">${a.description?.slice(0, 200) || '—'}</td>
+                    <td style="max-width:200px">${a.action_recommended?.slice(0, 150) || '—'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ---- Anomalies ----
+        async function loadAnomalies() {
+            const data = await fetchAPI('/api/anomalies');
+            if (!data || data.error) return;
+
+            const tbody = document.querySelector('#anomaly-table tbody');
+            tbody.innerHTML = (data.recent || []).slice(0, 20).map(a => `
+                <tr>
+                    <td>${a.anomaly_type}</td>
+                    <td>${a.resource_name}</td>
+                    <td>${severityBadge(a.severity)}</td>
+                    <td style="max-width:300px">${a.description?.slice(0, 200) || '—'}</td>
+                    <td>${a.deviation_pct?.toFixed(1) || '—'}%</td>
+                </tr>
+            `).join('');
+        }
+
+        // ---- Queries ----
+        async function loadQueries() {
+            const data = await fetchAPI('/api/queries');
+            if (!data || data.error) return;
+
+            const tbody = document.querySelector('#query-table tbody');
+            tbody.innerHTML = (data.optimizations || []).map(q => `
+                <tr>
+                    <td>${severityBadge(q.priority)}</td>
+                    <td style="max-width:250px;font-family:monospace;font-size:11px">${q.query_text?.slice(0, 100) || '—'}</td>
+                    <td style="max-width:300px">${q.optimization_suggestion?.slice(0, 200) || '—'}</td>
+                    <td>$${q.estimated_cost?.toFixed(2) || '0.00'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ---- Chat ----
+        async function sendChat() {
+            const input = document.getElementById('chatInput');
+            const msg = input.value.trim();
+            if (!msg) return;
+
+            input.value = '';
+            addChatMsg(msg, 'user');
+            document.getElementById('chatSendBtn').disabled = true;
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: msg, session_id: sessionId }),
+                });
+                const data = await res.json();
+                addChatMsg(data.response || 'No response.', 'assistant');
+            } catch (e) {
+                addChatMsg('Error connecting to the FinOps agent.', 'assistant');
+            }
+            document.getElementById('chatSendBtn').disabled = false;
+        }
+
+        function sendSuggestion(el) {
+            document.getElementById('chatInput').value = el.textContent;
+            sendChat();
+        }
+
+        function addChatMsg(text, role) {
+            const container = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.className = 'chat-msg ' + role;
+            div.textContent = text;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // ---- Tab Router ----
+        function loadTabData(tab) {
+            switch (tab) {
+                case 'overview': loadOverview(); break;
+                case 'costs': loadCosts(); break;
+                case 'performance': loadPerformance(); break;
+                case 'quality': loadQuality(); break;
+                case 'security': loadSecurity(); break;
+                case 'anomalies': loadAnomalies(); break;
+                case 'queries': loadQueries(); break;
+            }
+        }
+
+        // Initial load
+        loadOverview();
+
+        // Auto-refresh overview every 60s
+        setInterval(() => {
+            const activeTab = document.querySelector('.tab.active')?.dataset.tab;
+            if (activeTab === 'overview') loadOverview();
+        }, 60000);
+    </script>
+</body>
+</html>
