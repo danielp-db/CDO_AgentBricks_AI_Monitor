@@ -4,7 +4,7 @@
 # MAGIC # 05 - Security Auditing (Every 5 min)
 # MAGIC
 # MAGIC Unauthorized access detection, permission drift monitoring.
-# MAGIC Uses AgentBricks FinOps Assistant for threat analysis.
+# MAGIC Uses `system.access.audit` for real audit event analysis.
 
 # COMMAND ----------
 
@@ -19,7 +19,7 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Collect Security Data
+# MAGIC ## Collect Security Data from system.access.audit
 
 # COMMAND ----------
 
@@ -28,55 +28,92 @@ import json
 
 now = datetime.utcnow()
 
-# Recent failed logins (last 30 min)
-df_failed_logins = spark.sql(f"""
-    SELECT user_name, ip_address, COUNT(*) as attempt_count,
-           MIN(timestamp) as first_attempt, MAX(timestamp) as last_attempt
-    FROM {CATALOG}.{SCHEMA}.audit_logs
-    WHERE timestamp >= current_timestamp() - INTERVAL 30 MINUTES
-      AND action = 'workspace.access'
-      AND status = 'FAILURE'
-    GROUP BY user_name, ip_address
-    HAVING COUNT(*) >= 3
+# Failed authentication attempts (last 30 min)
+df_failed_logins = spark.sql("""
+    SELECT user_identity.email as user_email,
+           source_ip_address,
+           COUNT(*) as attempt_count,
+           MIN(event_time) as first_attempt,
+           MAX(event_time) as last_attempt
+    FROM system.access.audit
+    WHERE event_time >= current_timestamp() - INTERVAL 30 MINUTES
+      AND action_name IN ('login', 'tokenLogin', 'aadTokenLogin')
+      AND response.status_code >= 400
+    GROUP BY user_identity.email, source_ip_address
+    HAVING COUNT(*) >= 2
     ORDER BY attempt_count DESC
 """)
 
-# Permission changes (last hour)
-df_permission_changes = spark.sql(f"""
-    SELECT user_name, resource_id, timestamp, source, ip_address
-    FROM {CATALOG}.{SCHEMA}.audit_logs
-    WHERE timestamp >= current_timestamp() - INTERVAL 1 HOUR
-      AND action = 'permissions.changePermission'
-    ORDER BY timestamp DESC
+# Permission / grant changes (last hour)
+df_permission_changes = spark.sql("""
+    SELECT user_identity.email as user_email,
+           action_name,
+           service_name,
+           event_time,
+           source_ip_address,
+           request_params
+    FROM system.access.audit
+    WHERE event_time >= current_timestamp() - INTERVAL 1 HOUR
+      AND action_name IN (
+          'updatePermissions', 'changePermissions',
+          'grantPermission', 'revokePermission',
+          'updateSharePermissions'
+      )
+    ORDER BY event_time DESC
 """)
 
-# Unusual token creation
-df_tokens = spark.sql(f"""
-    SELECT user_name, COUNT(*) as token_count,
-           MIN(timestamp) as first_created, MAX(timestamp) as last_created
-    FROM {CATALOG}.{SCHEMA}.audit_logs
-    WHERE timestamp >= current_timestamp() - INTERVAL 1 HOUR
-      AND action = 'tokens.create'
-    GROUP BY user_name
-    HAVING COUNT(*) >= 3
+# Token creation events
+df_tokens = spark.sql("""
+    SELECT user_identity.email as user_email,
+           COUNT(*) as token_count,
+           MIN(event_time) as first_created,
+           MAX(event_time) as last_created
+    FROM system.access.audit
+    WHERE event_time >= current_timestamp() - INTERVAL 1 HOUR
+      AND action_name IN ('createToken', 'generateToken', 'create')
+      AND service_name = 'tokens'
+    GROUP BY user_identity.email
+    HAVING COUNT(*) >= 2
 """)
 
-# Suspicious activity summary
-df_suspicious = spark.sql(f"""
-    SELECT action, action_type, user_name, source, COUNT(*) as count
-    FROM {CATALOG}.{SCHEMA}.audit_logs
-    WHERE timestamp >= current_timestamp() - INTERVAL 30 MINUTES
-      AND is_suspicious = true
-    GROUP BY action, action_type, user_name, source
-    ORDER BY count DESC
+# High-volume actions (potential automation or abuse)
+df_high_volume = spark.sql("""
+    SELECT user_identity.email as user_email,
+           action_name,
+           service_name,
+           COUNT(*) as action_count
+    FROM system.access.audit
+    WHERE event_time >= current_timestamp() - INTERVAL 30 MINUTES
+    GROUP BY user_identity.email, action_name, service_name
+    HAVING COUNT(*) >= 50
+    ORDER BY action_count DESC
+""")
+
+# Recent sensitive actions
+df_sensitive = spark.sql("""
+    SELECT user_identity.email as user_email,
+           action_name,
+           service_name,
+           source_ip_address,
+           event_time,
+           response.status_code as status_code
+    FROM system.access.audit
+    WHERE event_time >= current_timestamp() - INTERVAL 30 MINUTES
+      AND (
+          action_name IN ('deleteCluster', 'deletePipeline', 'deleteEndpoint',
+                          'deleteWarehouse', 'dropTable', 'dropSchema', 'dropCatalog')
+          OR (service_name = 'secrets' AND action_name IN ('putSecret', 'deleteSecret'))
+      )
+    ORDER BY event_time DESC
 """)
 
 failed_logins = [row.asDict() for row in df_failed_logins.collect()]
 perm_changes = [row.asDict() for row in df_permission_changes.collect()]
 token_events = [row.asDict() for row in df_tokens.collect()]
-suspicious = [row.asDict() for row in df_suspicious.collect()]
+high_volume = [row.asDict() for row in df_high_volume.collect()]
+sensitive_actions = [row.asDict() for row in df_sensitive.collect()]
 
-print(f"Security data: {len(failed_logins)} failed login patterns, {len(perm_changes)} permission changes, {len(token_events)} token anomalies")
+print(f"Security data: {len(failed_logins)} failed login patterns, {len(perm_changes)} permission changes, {len(token_events)} token anomalies, {len(high_volume)} high-volume users, {len(sensitive_actions)} sensitive actions")
 
 # COMMAND ----------
 
@@ -94,9 +131,9 @@ ENDPOINTS_TO_TRY = [ENDPOINT_NAME]
 
 def call_finops_agent(prompt):
     system_msg = (
-        "You are the AI FinOps Security Auditor. Analyze audit logs for security threats "
-        "including brute force attacks, unauthorized access, permission drift, and suspicious "
-        "activity. Classify severity: CRITICAL, HIGH, MEDIUM, LOW. "
+        "You are the AI FinOps Security Auditor. Analyze audit logs from system.access.audit "
+        "for security threats including brute force attacks, unauthorized access, permission drift, "
+        "and suspicious activity. Classify severity: CRITICAL, HIGH, MEDIUM, LOW. "
         "Return JSON with keys: summary, alerts, risk_score, immediate_actions."
     )
     messages = [
@@ -122,24 +159,27 @@ def serialize_for_prompt(data):
     return json.dumps(data, indent=2, default=default_handler)
 
 
-security_prompt = f"""Analyze the following security audit data and identify threats.
+security_prompt = f"""Analyze the following security audit data from system.access.audit and identify threats.
 
-## Failed Login Attempts (Last 30 min, 3+ attempts):
+## Failed Authentication Attempts (Last 30 min, 2+ attempts):
 {serialize_for_prompt(failed_logins)}
 
-## Permission Changes (Last Hour):
+## Permission / Grant Changes (Last Hour):
 {serialize_for_prompt(perm_changes)}
 
-## Unusual Token Creation (3+ in 1 hour):
+## Token Creation Events (2+ in 1 hour):
 {serialize_for_prompt(token_events)}
 
-## Flagged Suspicious Activity:
-{serialize_for_prompt(suspicious)}
+## High-Volume Actions (50+ in 30 min per user):
+{serialize_for_prompt(high_volume)}
 
-For each finding, classify severity:
-- CRITICAL: Active attack or confirmed breach (brute force with 10+ attempts, mass permission changes)
-- HIGH: Likely malicious activity (repeated failed logins, unusual admin actions)
-- MEDIUM: Requires investigation (permission changes, token creation spikes)
+## Sensitive Destructive Actions (Last 30 min):
+{serialize_for_prompt(sensitive_actions)}
+
+Severity classification:
+- CRITICAL: Active attack or confirmed breach (10+ failed logins, mass deletions, mass permission changes)
+- HIGH: Likely malicious (repeated failed logins, unusual admin actions, secret modifications)
+- MEDIUM: Requires investigation (permission changes, token creation spikes, high-volume automation)
 - LOW: Informational (unusual patterns from known accounts)
 
 Return JSON with:
@@ -186,8 +226,7 @@ try:
 
 except Exception as e:
     print(f"Parse error: {e}")
-    # Store summary result
-    if failed_logins or suspicious:
+    if failed_logins or high_volume or sensitive_actions:
         results.append(Row(
             run_timestamp=run_timestamp,
             severity="MEDIUM",

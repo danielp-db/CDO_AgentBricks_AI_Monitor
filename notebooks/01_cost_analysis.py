@@ -3,7 +3,7 @@
 # MAGIC %md
 # MAGIC # 01 - Cost Analysis (Hourly)
 # MAGIC
-# MAGIC Per-agent, per-model cost attribution and trend analysis.
+# MAGIC Per-SKU, per-endpoint cost attribution and trend analysis using `system.billing.usage`.
 # MAGIC Uses the AgentBricks FinOps Assistant to analyze billing data and provide insights.
 
 # COMMAND ----------
@@ -19,7 +19,7 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Collect Cost Data
+# MAGIC ## Collect Cost Data from system.billing.usage
 
 # COMMAND ----------
 
@@ -27,59 +27,72 @@ from datetime import datetime, timedelta
 import json
 
 now = datetime.utcnow()
-one_week_ago = now - timedelta(days=7)
-two_weeks_ago = now - timedelta(days=14)
 
-# Current week costs by agent
-df_current = spark.sql(f"""
-    SELECT agent_name,
-           SUM(total_cost) as total_cost,
-           SUM(dbu_usage) as total_dbus,
+# Current week costs by SKU
+df_current = spark.sql("""
+    SELECT sku_name,
+           billing_origin_product,
+           usage_metadata.endpoint_name as endpoint_name,
+           SUM(usage_quantity) as total_dbus,
            COUNT(*) as record_count
-    FROM {CATALOG}.{SCHEMA}.billing_usage
-    WHERE usage_date >= '{one_week_ago.strftime("%Y-%m-%d")}'
-    GROUP BY agent_name
-    ORDER BY total_cost DESC
+    FROM system.billing.usage
+    WHERE usage_date >= current_date() - INTERVAL 7 DAYS
+    GROUP BY sku_name, billing_origin_product, usage_metadata.endpoint_name
+    ORDER BY total_dbus DESC
+    LIMIT 50
 """)
 
 # Previous week for comparison
-df_previous = spark.sql(f"""
-    SELECT agent_name,
-           SUM(total_cost) as total_cost,
-           SUM(dbu_usage) as total_dbus
-    FROM {CATALOG}.{SCHEMA}.billing_usage
-    WHERE usage_date >= '{two_weeks_ago.strftime("%Y-%m-%d")}'
-      AND usage_date < '{one_week_ago.strftime("%Y-%m-%d")}'
-    GROUP BY agent_name
+df_previous = spark.sql("""
+    SELECT sku_name,
+           SUM(usage_quantity) as total_dbus
+    FROM system.billing.usage
+    WHERE usage_date >= current_date() - INTERVAL 14 DAYS
+      AND usage_date < current_date() - INTERVAL 7 DAYS
+    GROUP BY sku_name
 """)
 
-# Cost by SKU
-df_sku = spark.sql(f"""
-    SELECT sku_name,
-           SUM(total_cost) as total_cost,
-           SUM(dbu_usage) as total_dbus
-    FROM {CATALOG}.{SCHEMA}.billing_usage
-    WHERE usage_date >= '{one_week_ago.strftime("%Y-%m-%d")}'
-    GROUP BY sku_name
-    ORDER BY total_cost DESC
+# Cost by billing origin product
+df_by_product = spark.sql("""
+    SELECT billing_origin_product,
+           SUM(usage_quantity) as total_dbus,
+           COUNT(DISTINCT sku_name) as sku_count
+    FROM system.billing.usage
+    WHERE usage_date >= current_date() - INTERVAL 7 DAYS
+    GROUP BY billing_origin_product
+    ORDER BY total_dbus DESC
 """)
 
 # Daily trend
-df_daily = spark.sql(f"""
-    SELECT DATE(usage_date) as date,
-           SUM(total_cost) as daily_cost
-    FROM {CATALOG}.{SCHEMA}.billing_usage
-    WHERE usage_date >= '{one_week_ago.strftime("%Y-%m-%d")}'
-    GROUP BY DATE(usage_date)
-    ORDER BY date
+df_daily = spark.sql("""
+    SELECT usage_date as date,
+           SUM(usage_quantity) as daily_dbus
+    FROM system.billing.usage
+    WHERE usage_date >= current_date() - INTERVAL 14 DAYS
+    GROUP BY usage_date
+    ORDER BY usage_date
+""")
+
+# Serving / agent-specific costs
+df_serving = spark.sql("""
+    SELECT usage_metadata.endpoint_name as endpoint_name,
+           sku_name,
+           SUM(usage_quantity) as total_dbus
+    FROM system.billing.usage
+    WHERE usage_date >= current_date() - INTERVAL 7 DAYS
+      AND usage_metadata.endpoint_name IS NOT NULL
+    GROUP BY usage_metadata.endpoint_name, sku_name
+    ORDER BY total_dbus DESC
+    LIMIT 30
 """)
 
 current_data = [row.asDict() for row in df_current.collect()]
 previous_data = [row.asDict() for row in df_previous.collect()]
-sku_data = [row.asDict() for row in df_sku.collect()]
+product_data = [row.asDict() for row in df_by_product.collect()]
 daily_data = [row.asDict() for row in df_daily.collect()]
+serving_data = [row.asDict() for row in df_serving.collect()]
 
-print(f"Collected cost data: {len(current_data)} agents, {len(sku_data)} SKUs")
+print(f"Collected cost data: {len(current_data)} SKU/endpoint combos, {len(product_data)} products, {len(serving_data)} serving endpoints")
 
 # COMMAND ----------
 
@@ -93,11 +106,10 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 w = WorkspaceClient()
 
-# Try AgentBricks endpoint first, fall back to foundation model
 ENDPOINTS_TO_TRY = [ENDPOINT_NAME]
 
 def call_finops_agent(prompt, system_context=None):
-    """Call the FinOps agent with fallback to foundation model."""
+    """Call the FinOps agent."""
     system_msg = system_context or (
         "You are the AI Agentic FinOps Assistant analyzing Databricks platform costs. "
         "Provide structured analysis with specific numbers, trends, and actionable recommendations. "
@@ -132,7 +144,6 @@ def call_finops_agent(prompt, system_context=None):
 
 # COMMAND ----------
 
-# Prepare context for the agent
 def serialize_for_prompt(data):
     """Convert data to string, handling datetime objects."""
     def default_handler(obj):
@@ -141,26 +152,29 @@ def serialize_for_prompt(data):
         return str(obj)
     return json.dumps(data, indent=2, default=default_handler)
 
-cost_prompt = f"""Analyze the following Databricks platform cost data and provide a comprehensive cost report.
+cost_prompt = f"""Analyze the following Databricks platform cost data from system.billing.usage and provide a comprehensive cost report.
 
-## Current Week Costs by Agent:
+## Current Week Usage by SKU and Endpoint (DBUs):
 {serialize_for_prompt(current_data)}
 
-## Previous Week Costs by Agent:
+## Previous Week Usage by SKU (DBUs):
 {serialize_for_prompt(previous_data)}
 
-## Costs by SKU:
-{serialize_for_prompt(sku_data)}
+## Usage by Billing Product:
+{serialize_for_prompt(product_data)}
 
-## Daily Cost Trend:
+## Serving Endpoint Usage (DBUs):
+{serialize_for_prompt(serving_data)}
+
+## Daily DBU Trend (14 days):
 {serialize_for_prompt(daily_data)}
 
 Provide your analysis as JSON with these keys:
 - summary: A 2-3 sentence executive summary
-- total_cost: Total cost this week
-- cost_change_pct: Week-over-week change percentage
-- top_spender: The agent with highest cost
-- findings: List of key findings (each with agent_name, finding, severity)
+- total_cost: Total estimated cost this week (use $0.07/DBU as approximate rate)
+- cost_change_pct: Week-over-week change percentage in DBU consumption
+- top_spender: The SKU or endpoint with highest DBU usage
+- findings: List of key findings (each with name, finding, severity)
 - recommendations: List of optimization recommendations (each with action, estimated_savings, priority)
 - alerts: List of cost alerts if any anomalies detected
 """
@@ -180,9 +194,7 @@ from pyspark.sql import Row
 
 run_timestamp = datetime.utcnow()
 
-# Try to parse JSON from the response
 try:
-    # Extract JSON from response (may be wrapped in markdown code blocks)
     json_text = response_text
     if "```json" in json_text:
         json_text = json_text.split("```json")[1].split("```")[0]
@@ -197,7 +209,6 @@ try:
     recommendations = json.dumps(analysis.get("recommendations", []))
 
     results = []
-    # Overall analysis
     results.append(Row(
         run_timestamp=run_timestamp,
         analysis_type="weekly_summary",
@@ -209,12 +220,11 @@ try:
         raw_response=response_text,
     ))
 
-    # Per-agent findings
     for finding in analysis.get("findings", []):
         results.append(Row(
             run_timestamp=run_timestamp,
             analysis_type="agent_finding",
-            agent_name=finding.get("agent_name", "unknown"),
+            agent_name=finding.get("name", finding.get("agent_name", "unknown")),
             summary=finding.get("finding", ""),
             total_cost=0.0,
             cost_change_pct=0.0,
@@ -224,13 +234,12 @@ try:
 
 except (json.JSONDecodeError, Exception) as e:
     print(f"Could not parse JSON response: {e}")
-    # Store raw response
     results = [Row(
         run_timestamp=run_timestamp,
         analysis_type="raw_analysis",
         agent_name="ALL",
         summary=response_text[:500] if response_text else "No response",
-        total_cost=sum(r.get("total_cost", 0) for r in current_data),
+        total_cost=0.0,
         cost_change_pct=0.0,
         recommendations="",
         raw_response=response_text or "",

@@ -4,7 +4,7 @@
 # MAGIC # 02 - Performance Monitoring (Every 15 min)
 # MAGIC
 # MAGIC Latency, throughput, error rate tracking with SLA validation.
-# MAGIC Calls the AgentBricks FinOps Assistant to evaluate performance against SLAs.
+# MAGIC Uses `system.ai_gateway.usage` for serving endpoint metrics.
 
 # COMMAND ----------
 
@@ -19,7 +19,7 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Collect Performance Metrics
+# MAGIC ## Collect Performance Metrics from system.ai_gateway.usage
 
 # COMMAND ----------
 
@@ -28,24 +28,6 @@ import json
 
 now = datetime.utcnow()
 
-# Last hour of metrics per endpoint
-df_recent = spark.sql(f"""
-    SELECT endpoint_name,
-           model_name,
-           AVG(avg_latency_ms) as avg_latency,
-           AVG(p95_latency_ms) as avg_p95_latency,
-           AVG(p99_latency_ms) as avg_p99_latency,
-           SUM(request_count) as total_requests,
-           SUM(error_count) as total_errors,
-           AVG(error_rate) as avg_error_rate,
-           SUM(total_tokens) as total_tokens,
-           MAX(CASE WHEN is_anomaly THEN 1 ELSE 0 END) as has_anomaly
-    FROM {CATALOG}.{SCHEMA}.serving_metrics
-    WHERE timestamp >= current_timestamp() - INTERVAL 1 HOUR
-    GROUP BY endpoint_name, model_name
-    ORDER BY avg_latency DESC
-""")
-
 # SLA thresholds
 SLA_CONFIG = {
     "avg_latency_ms": 1000,
@@ -53,20 +35,39 @@ SLA_CONFIG = {
     "error_rate_pct": 5.0,
 }
 
-recent_data = [row.asDict() for row in df_recent.collect()]
-
-# Historical baseline (last 24 hours)
-df_baseline = spark.sql(f"""
+# Last hour metrics per endpoint
+df_recent = spark.sql("""
     SELECT endpoint_name,
-           AVG(avg_latency_ms) as baseline_latency,
-           AVG(error_rate) as baseline_error_rate,
-           AVG(request_count) as baseline_throughput
-    FROM {CATALOG}.{SCHEMA}.serving_metrics
-    WHERE timestamp >= current_timestamp() - INTERVAL 24 HOURS
-      AND timestamp < current_timestamp() - INTERVAL 1 HOUR
+           destination_name as model_name,
+           COUNT(*) as request_count,
+           AVG(latency_ms) as avg_latency,
+           PERCENTILE(latency_ms, 0.5) as p50_latency,
+           PERCENTILE(latency_ms, 0.95) as p95_latency,
+           PERCENTILE(latency_ms, 0.99) as p99_latency,
+           SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count,
+           ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as error_rate_pct,
+           SUM(total_tokens) as total_tokens,
+           SUM(input_tokens) as input_tokens,
+           SUM(output_tokens) as output_tokens
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL 1 HOUR
+    GROUP BY endpoint_name, destination_name
+    ORDER BY avg_latency DESC
+""")
+
+# 24h baseline per endpoint
+df_baseline = spark.sql("""
+    SELECT endpoint_name,
+           AVG(latency_ms) as baseline_latency,
+           ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as baseline_error_rate,
+           COUNT(*) / 24.0 as baseline_throughput_per_hour
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL 24 HOURS
+      AND event_time < current_timestamp() - INTERVAL 1 HOUR
     GROUP BY endpoint_name
 """)
 
+recent_data = [row.asDict() for row in df_recent.collect()]
 baseline_data = {row.endpoint_name: row.asDict() for row in df_baseline.collect()}
 
 print(f"Collected metrics for {len(recent_data)} endpoint-model pairs")
@@ -87,7 +88,7 @@ ENDPOINTS_TO_TRY = [ENDPOINT_NAME]
 
 def call_finops_agent(prompt):
     system_msg = (
-        "You are the AI FinOps Performance Monitor. Analyze serving endpoint metrics, "
+        "You are the AI FinOps Performance Monitor. Analyze serving endpoint metrics from system.ai_gateway.usage, "
         "validate against SLA thresholds, and flag violations. "
         "Return JSON with keys: summary, sla_violations, endpoint_health, recommendations."
     )
@@ -114,7 +115,7 @@ def serialize_for_prompt(data):
     return json.dumps(data, indent=2, default=default_handler)
 
 
-perf_prompt = f"""Analyze the following serving endpoint performance metrics and check for SLA violations.
+perf_prompt = f"""Analyze the following serving endpoint performance metrics from system.ai_gateway.usage and check for SLA violations.
 
 ## SLA Thresholds:
 - Average Latency: < {SLA_CONFIG['avg_latency_ms']}ms
@@ -166,8 +167,8 @@ try:
             run_timestamp=run_timestamp,
             endpoint_name=ep_name,
             avg_latency_ms=float(metric.get("avg_latency", 0)),
-            p95_latency_ms=float(metric.get("avg_p95_latency", 0)),
-            error_rate=float(metric.get("avg_error_rate", 0)),
+            p95_latency_ms=float(metric.get("p95_latency", 0)),
+            error_rate=float(metric.get("error_rate_pct", 0)) / 100.0,
             sla_status=ep_health.get("status", "UNKNOWN"),
             summary=ep_health.get("details", ""),
             recommendations=json.dumps(analysis.get("recommendations", [])),
@@ -180,15 +181,15 @@ except Exception as e:
         sla_status = "HEALTHY"
         if metric.get("avg_latency", 0) > SLA_CONFIG["avg_latency_ms"]:
             sla_status = "WARNING"
-        if metric.get("avg_error_rate", 0) > SLA_CONFIG["error_rate_pct"] / 100:
+        if metric.get("error_rate_pct", 0) > SLA_CONFIG["error_rate_pct"]:
             sla_status = "CRITICAL"
 
         results.append(Row(
             run_timestamp=run_timestamp,
             endpoint_name=metric.get("endpoint_name", "unknown"),
             avg_latency_ms=float(metric.get("avg_latency", 0)),
-            p95_latency_ms=float(metric.get("avg_p95_latency", 0)),
-            error_rate=float(metric.get("avg_error_rate", 0)),
+            p95_latency_ms=float(metric.get("p95_latency", 0)),
+            error_rate=float(metric.get("error_rate_pct", 0)) / 100.0,
             sla_status=sla_status,
             summary=response_text[:500] if response_text else "No response",
             recommendations="",

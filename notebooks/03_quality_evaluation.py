@@ -3,8 +3,8 @@
 # MAGIC %md
 # MAGIC # 03 - Quality Evaluation (Daily)
 # MAGIC
-# MAGIC MLflow-as-judge quality scores and drift detection.
-# MAGIC Uses AgentBricks FinOps Assistant to assess quality trends.
+# MAGIC Derives quality signals from `system.ai_gateway.usage` (error rates, latency distribution)
+# MAGIC and combines with MLflow evaluation scores. Uses AgentBricks FinOps Assistant to assess trends.
 
 # COMMAND ----------
 
@@ -19,7 +19,7 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Collect Quality Data
+# MAGIC ## Collect Quality Signals from system.ai_gateway.usage
 
 # COMMAND ----------
 
@@ -28,48 +28,55 @@ import json
 
 now = datetime.utcnow()
 
-# Recent quality scores
-df_recent = spark.sql(f"""
+# Per-endpoint quality proxy: error rates, latency consistency, token efficiency
+df_recent = spark.sql("""
     SELECT endpoint_name,
-           AVG(relevance_score) as avg_relevance,
-           AVG(faithfulness_score) as avg_faithfulness,
-           AVG(safety_score) as avg_safety,
-           AVG(coherence_score) as avg_coherence,
-           AVG(overall_score) as avg_overall,
-           SUM(eval_count) as total_evals,
-           MAX(CASE WHEN drift_detected THEN 1 ELSE 0 END) as drift_detected
-    FROM {CATALOG}.{SCHEMA}.quality_scores
-    WHERE eval_date >= current_timestamp() - INTERVAL 7 DAYS
-    GROUP BY endpoint_name
+           destination_name as model_name,
+           COUNT(*) as total_requests,
+           ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 4) as error_rate_pct,
+           ROUND(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 4) as server_error_pct,
+           AVG(latency_ms) as avg_latency,
+           STDDEV(latency_ms) as latency_stddev,
+           AVG(output_tokens) as avg_output_tokens,
+           STDDEV(output_tokens) as output_token_stddev,
+           AVG(CASE WHEN output_tokens > 0 THEN input_tokens / output_tokens ELSE NULL END) as input_output_ratio
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL 7 DAYS
+    GROUP BY endpoint_name, destination_name
+    HAVING COUNT(*) >= 10
 """)
 
-# Historical baseline (previous 7 days)
-df_baseline = spark.sql(f"""
-    SELECT endpoint_name,
-           AVG(overall_score) as baseline_overall,
-           AVG(relevance_score) as baseline_relevance,
-           AVG(faithfulness_score) as baseline_faithfulness
-    FROM {CATALOG}.{SCHEMA}.quality_scores
-    WHERE eval_date >= current_timestamp() - INTERVAL 14 DAYS
-      AND eval_date < current_timestamp() - INTERVAL 7 DAYS
-    GROUP BY endpoint_name
-""")
-
-# Drift trend (daily)
-df_trend = spark.sql(f"""
-    SELECT DATE(eval_date) as date,
+# Weekly trend: daily error rates per endpoint
+df_daily_quality = spark.sql("""
+    SELECT DATE(event_time) as date,
            endpoint_name,
-           overall_score
-    FROM {CATALOG}.{SCHEMA}.quality_scores
-    WHERE eval_date >= current_timestamp() - INTERVAL 30 DAYS
+           COUNT(*) as requests,
+           ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 4) as error_rate_pct,
+           AVG(latency_ms) as avg_latency,
+           PERCENTILE(latency_ms, 0.95) as p95_latency
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL 14 DAYS
+    GROUP BY DATE(event_time), endpoint_name
     ORDER BY date
 """)
 
-recent_data = [row.asDict() for row in df_recent.collect()]
-baseline_data = [row.asDict() for row in df_baseline.collect()]
-trend_data = [row.asDict() for row in df_trend.collect()]
+# Previous week baseline
+df_baseline = spark.sql("""
+    SELECT endpoint_name,
+           ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 4) as baseline_error_rate,
+           AVG(latency_ms) as baseline_latency,
+           AVG(output_tokens) as baseline_output_tokens
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL 14 DAYS
+      AND event_time < current_timestamp() - INTERVAL 7 DAYS
+    GROUP BY endpoint_name
+""")
 
-print(f"Quality data: {len(recent_data)} endpoints, {len(trend_data)} daily records")
+recent_data = [row.asDict() for row in df_recent.collect()]
+daily_data = [row.asDict() for row in df_daily_quality.collect()]
+baseline_data = [row.asDict() for row in df_baseline.collect()]
+
+print(f"Quality data: {len(recent_data)} endpoints, {len(daily_data)} daily records")
 
 # COMMAND ----------
 
@@ -87,8 +94,8 @@ ENDPOINTS_TO_TRY = [ENDPOINT_NAME]
 
 def call_finops_agent(prompt):
     system_msg = (
-        "You are the AI FinOps Quality Evaluator. Analyze MLflow quality scores, "
-        "detect drift patterns, and recommend retraining. "
+        "You are the AI FinOps Quality Evaluator. Analyze serving endpoint quality signals "
+        "(error rates, latency consistency, token efficiency) to detect degradation patterns. "
         "Return JSON with keys: summary, drift_alerts, quality_report, recommendations."
     )
     messages = [
@@ -114,27 +121,29 @@ def serialize_for_prompt(data):
     return json.dumps(data, indent=2, default=default_handler)
 
 
-quality_prompt = f"""Analyze quality evaluation scores for our GenAI agent endpoints.
+quality_prompt = f"""Analyze quality signals for our GenAI agent endpoints using system.ai_gateway.usage data.
 
-## Quality Thresholds:
-- Overall score: >= 0.80 (acceptable), >= 0.90 (good)
-- Drift alert: >10% decline over 7 days
-- Safety: must be >= 0.90 at all times
+## Quality Indicators:
+- Error rate: < 2% (good), < 5% (acceptable), > 5% (degraded)
+- Latency consistency: low stddev relative to mean = stable quality
+- Output token consistency: high variance may indicate inconsistent responses
+- Drift alert: >50% increase in error rate or latency week-over-week
 
-## Current Week Scores:
+## Current Week Quality Signals:
 {serialize_for_prompt(recent_data)}
 
 ## Previous Week Baseline:
 {serialize_for_prompt(baseline_data)}
 
-## 30-Day Trend (sample):
-{serialize_for_prompt(trend_data[:20])}
+## Daily Trend (14 days):
+{serialize_for_prompt(daily_data[:30])}
 
 Return JSON with:
 - summary: Overall quality status
-- drift_alerts: Endpoints with quality drift (endpoint_name, metric, current, baseline, change_pct)
-- quality_report: Per-endpoint quality assessment (endpoint_name, status, scores, notes)
-- recommendations: Retraining and improvement actions
+- drift_alerts: Endpoints with quality degradation (endpoint_name, metric, current, baseline, change_pct)
+- quality_report: Per-endpoint assessment (endpoint_name, status, overall_score, notes)
+  - Compute overall_score as: 1.0 - (error_rate_pct/100) - (latency_stddev/avg_latency * 0.1), clamped to [0,1]
+- recommendations: Improvement actions
 """
 
 response_text, endpoint_used = call_finops_agent(quality_prompt)
@@ -163,13 +172,12 @@ try:
 
     for report in analysis.get("quality_report", []):
         ep_name = report.get("endpoint_name", "unknown")
-        metric = next((m for m in recent_data if m.get("endpoint_name") == ep_name), {})
         drift = any(d.get("endpoint_name") == ep_name for d in analysis.get("drift_alerts", []))
 
         results.append(Row(
             run_timestamp=run_timestamp,
             endpoint_name=ep_name,
-            overall_score=float(metric.get("avg_overall", 0)),
+            overall_score=float(report.get("overall_score", 0)),
             drift_detected=drift,
             summary=report.get("notes", report.get("status", "")),
             recommendations=json.dumps(analysis.get("recommendations", [])),
@@ -179,11 +187,13 @@ try:
 except Exception as e:
     print(f"Parse error: {e}")
     for metric in recent_data:
+        err_pct = float(metric.get("error_rate_pct", 0))
+        score = max(0, min(1.0, 1.0 - err_pct / 100.0))
         results.append(Row(
             run_timestamp=run_timestamp,
             endpoint_name=metric.get("endpoint_name", "unknown"),
-            overall_score=float(metric.get("avg_overall", 0)),
-            drift_detected=bool(metric.get("drift_detected", False)),
+            overall_score=score,
+            drift_detected=False,
             summary=response_text[:500] if response_text else "No response",
             recommendations="",
             raw_response=response_text or "",
