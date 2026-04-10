@@ -63,6 +63,22 @@ def run_query(query: str) -> list[dict[str, Any]]:
     return rows
 
 
+# Cache workspace_id -> workspace_url mapping
+_workspace_map: Optional[dict[str, str]] = None
+
+
+def get_workspace_map() -> dict[str, str]:
+    """Return {workspace_id: workspace_url} from system.access.workspaces_latest."""
+    global _workspace_map
+    if _workspace_map is None:
+        try:
+            rows = run_query("SELECT workspace_id, workspace_url FROM system.access.workspaces_latest")
+            _workspace_map = {r["workspace_id"]: r["workspace_url"] for r in rows}
+        except Exception:
+            _workspace_map = {}
+    return _workspace_map
+
+
 def serialize_result(data):
     """JSON-serialize results handling datetime objects."""
     def default_handler(obj):
@@ -75,6 +91,14 @@ def serialize_result(data):
 
 
 # --------------- API Routes ---------------
+
+@app.get("/api/workspaces")
+async def workspaces():
+    """Return workspace_id -> workspace_url mapping."""
+    try:
+        return JSONResponse(content=get_workspace_map())
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/api/health")
 async def health():
@@ -92,16 +116,30 @@ async def overview():
             ORDER BY run_timestamp DESC LIMIT 1
         """)
 
-        perf = run_query(f"""
-            SELECT endpoint_name, sla_status, avg_latency_ms, error_rate
-            FROM {CATALOG}.{SCHEMA}.performance_results
-            WHERE run_timestamp = (SELECT MAX(run_timestamp) FROM {CATALOG}.{SCHEMA}.performance_results)
+        perf = run_query("""
+            SELECT endpoint_name,
+                   workspace_id,
+                   AVG(latency_ms) as avg_latency_ms,
+                   ROUND(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) as error_rate,
+                   CASE
+                     WHEN AVG(latency_ms) > 2000 OR SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) > 5 THEN 'CRITICAL'
+                     WHEN AVG(latency_ms) > 1000 OR SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) > 2 THEN 'WARNING'
+                     ELSE 'HEALTHY'
+                   END as sla_status
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL 1 HOUR
+            GROUP BY endpoint_name, workspace_id
         """)
 
-        quality = run_query(f"""
-            SELECT endpoint_name, overall_score, drift_detected
-            FROM {CATALOG}.{SCHEMA}.quality_results
-            WHERE run_timestamp = (SELECT MAX(run_timestamp) FROM {CATALOG}.{SCHEMA}.quality_results)
+        quality = run_query("""
+            SELECT endpoint_name,
+                   workspace_id,
+                   ROUND(1.0 - (SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 1.0 / GREATEST(COUNT(*), 1)), 4) as overall_score,
+                   false as drift_detected
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL 7 DAYS
+            GROUP BY endpoint_name, workspace_id
+            HAVING COUNT(*) >= 5
         """)
 
         security = run_query(f"""
@@ -132,27 +170,27 @@ async def overview():
 
 @app.get("/api/costs")
 async def costs():
-    """Cost analysis data."""
+    """Cost analysis data from system.billing.usage."""
     try:
         latest = run_query(f"""
             SELECT * FROM {CATALOG}.{SCHEMA}.cost_analysis_results
             ORDER BY run_timestamp DESC LIMIT 20
         """)
 
-        trend = run_query(f"""
-            SELECT DATE(usage_date) as date,
-                   agent_name,
-                   SUM(total_cost) as daily_cost
-            FROM {CATALOG}.{SCHEMA}.billing_usage
-            WHERE usage_date >= current_timestamp() - INTERVAL 14 DAYS
-            GROUP BY DATE(usage_date), agent_name
-            ORDER BY date
+        trend = run_query("""
+            SELECT CAST(usage_date AS STRING) as date,
+                   billing_origin_product as agent_name,
+                   SUM(usage_quantity) as daily_cost
+            FROM system.billing.usage
+            WHERE usage_date >= current_date() - INTERVAL 14 DAYS
+            GROUP BY usage_date, billing_origin_product
+            ORDER BY usage_date
         """)
 
-        by_sku = run_query(f"""
-            SELECT sku_name, SUM(total_cost) as total
-            FROM {CATALOG}.{SCHEMA}.billing_usage
-            WHERE usage_date >= current_timestamp() - INTERVAL 7 DAYS
+        by_sku = run_query("""
+            SELECT sku_name, SUM(usage_quantity) as total
+            FROM system.billing.usage
+            WHERE usage_date >= current_date() - INTERVAL 7 DAYS
             GROUP BY sku_name ORDER BY total DESC
         """)
 
@@ -168,21 +206,23 @@ async def costs():
 
 @app.get("/api/performance")
 async def performance():
-    """Performance monitoring data."""
+    """Performance monitoring data from system.ai_gateway.usage."""
     try:
         latest = run_query(f"""
             SELECT * FROM {CATALOG}.{SCHEMA}.performance_results
             WHERE run_timestamp = (SELECT MAX(run_timestamp) FROM {CATALOG}.{SCHEMA}.performance_results)
         """)
 
-        latency_trend = run_query(f"""
-            SELECT DATE_TRUNC('HOUR', timestamp) as hour,
+        latency_trend = run_query("""
+            SELECT CAST(DATE_TRUNC('HOUR', event_time) AS STRING) as hour,
                    endpoint_name,
-                   AVG(avg_latency_ms) as avg_latency,
-                   AVG(p95_latency_ms) as p95_latency
-            FROM {CATALOG}.{SCHEMA}.serving_metrics
-            WHERE timestamp >= current_timestamp() - INTERVAL 24 HOURS
-            GROUP BY 1, 2 ORDER BY 1
+                   workspace_id,
+                   AVG(latency_ms) as avg_latency,
+                   PERCENTILE(latency_ms, 0.95) as p95_latency
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL 24 HOURS
+            GROUP BY DATE_TRUNC('HOUR', event_time), endpoint_name, workspace_id
+            ORDER BY 1
         """)
 
         return JSONResponse(content=serialize_result({
@@ -196,17 +236,22 @@ async def performance():
 
 @app.get("/api/quality")
 async def quality():
-    """Quality evaluation data."""
+    """Quality evaluation data from system.ai_gateway.usage."""
     try:
         latest = run_query(f"""
             SELECT * FROM {CATALOG}.{SCHEMA}.quality_results
             WHERE run_timestamp = (SELECT MAX(run_timestamp) FROM {CATALOG}.{SCHEMA}.quality_results)
         """)
 
-        trend = run_query(f"""
-            SELECT DATE(eval_date) as date, endpoint_name, overall_score
-            FROM {CATALOG}.{SCHEMA}.quality_scores
-            WHERE eval_date >= current_timestamp() - INTERVAL 30 DAYS
+        trend = run_query("""
+            SELECT CAST(DATE(event_time) AS STRING) as date,
+                   endpoint_name,
+                   workspace_id,
+                   ROUND(1.0 - (SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)), 4) as overall_score
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL 30 DAYS
+            GROUP BY DATE(event_time), endpoint_name, workspace_id
+            HAVING COUNT(*) >= 5
             ORDER BY date
         """)
 

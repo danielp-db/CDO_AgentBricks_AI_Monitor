@@ -321,7 +321,7 @@
                 <div class="card-title">Performance Status</div>
                 <div class="table-container">
                     <table id="perf-table">
-                        <thead><tr><th>Endpoint</th><th>Status</th><th>Avg Latency</th><th>Error Rate</th></tr></thead>
+                        <thead><tr><th>Endpoint</th><th>Workspace</th><th>Status</th><th>Avg Latency</th><th>Error Rate</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
@@ -355,7 +355,7 @@
                 <div class="card-title">Endpoint Performance</div>
                 <div class="table-container">
                     <table id="perf-detail-table">
-                        <thead><tr><th>Endpoint</th><th>Status</th><th>Avg Latency</th><th>P95 Latency</th><th>Error Rate</th><th>Analysis</th></tr></thead>
+                        <thead><tr><th>Endpoint</th><th>Workspace</th><th>Status</th><th>Avg Latency</th><th>P95 Latency</th><th>Error Rate</th><th>Analysis</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
@@ -372,7 +372,7 @@
                 <div class="card-title">Quality Report</div>
                 <div class="table-container">
                     <table id="quality-table">
-                        <thead><tr><th>Endpoint</th><th>Overall Score</th><th>Drift</th><th>Summary</th></tr></thead>
+                        <thead><tr><th>Endpoint</th><th>Workspace</th><th>Overall Score</th><th>Drift</th><th>Summary</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
@@ -484,12 +484,51 @@
 
         function num(v) { const n = Number(v); return isNaN(n) ? null : n; }
 
+        let wsMap = {};
+        const WS_DEFAULT = 'https://fevm-att-log-anomaly.cloud.databricks.com';
+
+        let wsMapLoaded = null;
+        async function loadWorkspaceMap() {
+            if (!wsMapLoaded) {
+                wsMapLoaded = fetchAPI('/api/workspaces').then(data => {
+                    if (data && !data.error) wsMap = data;
+                });
+            }
+            return wsMapLoaded;
+        }
+
+        function wsUrl(workspaceId) {
+            return wsMap[workspaceId] || WS_DEFAULT;
+        }
+
+        function endpointLink(name, workspaceId) {
+            if (!name || name === '—') return '—';
+            const base = wsUrl(workspaceId);
+            return `<a href="${base}/ml/endpoints/${encodeURIComponent(name)}" target="_blank" style="color:var(--accent-blue);text-decoration:none">${name}</a>`;
+        }
+        function queryLink(id, text, workspaceId) {
+            const display = (text || id || '—').slice(0, 100);
+            if (!id || id === '—') return `<span style="font-family:monospace;font-size:11px">${display}</span>`;
+            const base = wsUrl(workspaceId);
+            return `<a href="${base}/sql/history/${encodeURIComponent(id)}" target="_blank" style="color:var(--accent-blue);text-decoration:none;font-family:monospace;font-size:11px">${display}</a>`;
+        }
+        function wsLabel(workspaceId) {
+            if (!workspaceId) return '—';
+            const url = wsMap[workspaceId];
+            if (url) {
+                const name = url.replace('https://', '').replace('.cloud.databricks.com', '').replace('.azuredatabricks.net', '');
+                return `<a href="${url}" target="_blank" style="color:var(--text-secondary);text-decoration:none;font-size:12px" title="${url}">${name}</a>`;
+            }
+            return `<span style="font-size:12px">${workspaceId}</span>`;
+        }
+
         function destroyChart(id) {
             if (charts[id]) { charts[id].destroy(); delete charts[id]; }
         }
 
         // ---- Overview ----
         async function loadOverview() {
+            await loadWorkspaceMap();
             const data = await fetchAPI('/api/overview');
             if (!data || data.error) return;
 
@@ -528,7 +567,8 @@
             const tbody = document.querySelector('#perf-table tbody');
             tbody.innerHTML = (data.performance || []).map(p => `
                 <tr>
-                    <td>${p.endpoint_name}</td>
+                    <td>${endpointLink(p.endpoint_name, p.workspace_id)}</td>
+                    <td>${wsLabel(p.workspace_id)}</td>
                     <td>${statusBadge(p.sla_status)}</td>
                     <td>${num(p.avg_latency_ms) != null ? num(p.avg_latency_ms).toFixed(0) : '—'} ms</td>
                     <td>${num(p.error_rate) != null ? (num(p.error_rate) * 100).toFixed(2) : '—'}%</td>
@@ -536,6 +576,55 @@
             `).join('');
 
             document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+
+            // Load overview charts from costs and performance APIs
+            const costData = await fetchAPI('/api/costs');
+            if (costData && !costData.error && costData.trend?.length) {
+                const agents = [...new Set(costData.trend.map(r => r.agent_name))];
+                const dates = [...new Set(costData.trend.map(r => r.date))].sort();
+                destroyChart('costTrendChart');
+                charts.costTrendChart = new Chart(document.getElementById('costTrendChart'), {
+                    type: 'line',
+                    data: {
+                        labels: dates.map(d => String(d).slice(5)),
+                        datasets: agents.map((agent, i) => ({
+                            label: agent || 'unknown',
+                            data: dates.map(d => {
+                                const row = costData.trend.find(r => r.date === d && r.agent_name === agent);
+                                return num(row?.daily_cost) || 0;
+                            }),
+                            borderColor: COLORS[i % COLORS.length],
+                            tension: 0.3,
+                            fill: false,
+                        }))
+                    },
+                    options: { responsive: true, plugins: { legend: { labels: { color: '#9aa0a6' } } }, scales: { x: { ticks: { color: '#9aa0a6' } }, y: { ticks: { color: '#9aa0a6', callback: v => '$' + v } } } }
+                });
+            }
+
+            const perfData = await fetchAPI('/api/performance');
+            if (perfData && !perfData.error && perfData.latency_trend?.length) {
+                const endpoints = [...new Set(perfData.latency_trend.map(r => r.endpoint_name))];
+                const hours = [...new Set(perfData.latency_trend.map(r => r.hour))].sort();
+                destroyChart('latencyChart');
+                charts.latencyChart = new Chart(document.getElementById('latencyChart'), {
+                    type: 'line',
+                    data: {
+                        labels: hours.map(h => new Date(h).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+                        datasets: endpoints.map((ep, i) => ({
+                            label: ep,
+                            data: hours.map(h => {
+                                const row = perfData.latency_trend.find(r => r.hour === h && r.endpoint_name === ep);
+                                return num(row?.avg_latency) || 0;
+                            }),
+                            borderColor: COLORS[i % COLORS.length],
+                            tension: 0.3,
+                            fill: false,
+                        }))
+                    },
+                    options: { responsive: true, plugins: { legend: { labels: { color: '#9aa0a6' } } }, scales: { x: { ticks: { color: '#9aa0a6', maxTicksLimit: 12 } }, y: { ticks: { color: '#9aa0a6', callback: v => v + 'ms' } } } }
+                });
+            }
         }
 
         // ---- Costs ----
@@ -589,6 +678,7 @@
 
         // ---- Performance ----
         async function loadPerformance() {
+            await loadWorkspaceMap();
             const data = await fetchAPI('/api/performance');
             if (!data || data.error) return;
 
@@ -618,7 +708,8 @@
             const tbody = document.querySelector('#perf-detail-table tbody');
             tbody.innerHTML = (data.latest || []).map(p => `
                 <tr>
-                    <td>${p.endpoint_name}</td>
+                    <td>${endpointLink(p.endpoint_name, p.workspace_id)}</td>
+                    <td>${wsLabel(p.workspace_id)}</td>
                     <td>${statusBadge(p.sla_status)}</td>
                     <td>${num(p.avg_latency_ms) != null ? num(p.avg_latency_ms).toFixed(0) : '—'} ms</td>
                     <td>${num(p.p95_latency_ms) != null ? num(p.p95_latency_ms).toFixed(0) : '—'} ms</td>
@@ -630,6 +721,7 @@
 
         // ---- Quality ----
         async function loadQuality() {
+            await loadWorkspaceMap();
             const data = await fetchAPI('/api/quality');
             if (!data || data.error) return;
 
@@ -660,7 +752,8 @@
             const tbody = document.querySelector('#quality-table tbody');
             tbody.innerHTML = (data.latest || []).map(q => `
                 <tr>
-                    <td>${q.endpoint_name}</td>
+                    <td>${endpointLink(q.endpoint_name, q.workspace_id)}</td>
+                    <td>${wsLabel(q.workspace_id)}</td>
                     <td>${num(q.overall_score) != null ? num(q.overall_score).toFixed(3) : '—'}</td>
                     <td>${q.drift_detected ? severityBadge('HIGH') : statusBadge('HEALTHY')}</td>
                     <td style="max-width:400px">${q.summary?.slice(0, 200) || '—'}</td>
@@ -714,6 +807,7 @@
 
         // ---- Queries ----
         async function loadQueries() {
+            await loadWorkspaceMap();
             const data = await fetchAPI('/api/queries');
             if (!data || data.error) return;
 
@@ -721,7 +815,7 @@
             tbody.innerHTML = (data.optimizations || []).map(q => `
                 <tr>
                     <td>${severityBadge(q.priority)}</td>
-                    <td style="max-width:250px;font-family:monospace;font-size:11px">${q.query_text?.slice(0, 100) || '—'}</td>
+                    <td style="max-width:250px">${queryLink(q.query_id, q.query_text, q.workspace_id)}</td>
                     <td style="max-width:300px">${q.optimization_suggestion?.slice(0, 200) || '—'}</td>
                     <td>$${num(q.estimated_cost) != null ? num(q.estimated_cost).toFixed(2) : '0.00'}</td>
                 </tr>
